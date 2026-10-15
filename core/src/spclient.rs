@@ -827,10 +827,18 @@ impl SpClient {
         let mut tts = TtsRequest::new();
         tts.set_ssml(ssml.to_string());
         tts.audio_format = AudioFormat::MP3.into();
-        tts.tts_voice = TtsVoice::from_str(voice).unwrap_or(TtsVoice::VOICE1).into();
-        tts.tts_provider = TtsProvider::from_str(provider)
-            .unwrap_or(TtsProvider::SONANTIC_FAST)
-            .into();
+        tts.tts_voice = narration_voice(voice);
+        tts.tts_provider = match TtsProvider::from_str(provider) {
+            Some(provider) => provider.into(),
+            None => {
+                warn!("unknown narration provider {provider}, using SONANTIC_LARGE");
+                TtsProvider::SONANTIC_LARGE.into()
+            }
+        };
+        // The script names its language; without it the voice reads it as English.
+        if let Some(language) = ssml_language(ssml) {
+            tts.language = language.to_string();
+        }
         tts.sample_rate_hz = 44_100;
 
         let token = self.session().login5().auth_token().await?;
@@ -1047,6 +1055,28 @@ impl SpClient {
 const MAX_NARRATION_BYTES: usize = 4 * 1024 * 1024;
 
 /// The endpoint of a DJ session url, the only `hm://` urls a context leads to.
+/// The voice a narration names, like `VOICE81`. Voices newer than our protos are
+/// passed on by number, so the service still speaks in the right one.
+fn narration_voice(voice: &str) -> EnumOrUnknown<TtsVoice> {
+    if let Some(known) = TtsVoice::from_str(voice) {
+        return known.into();
+    }
+    match voice.strip_prefix("VOICE").and_then(|n| n.parse().ok()) {
+        Some(number) => EnumOrUnknown::from_i32(number),
+        None => {
+            warn!("unknown narration voice {voice}, using VOICE1");
+            TtsVoice::VOICE1.into()
+        }
+    }
+}
+
+/// The `xml:lang` of a narration's `<speak>` element, like `de-DE`.
+fn ssml_language(ssml: &str) -> Option<&str> {
+    let start = ssml.find("xml:lang=\"")? + "xml:lang=\"".len();
+    let len = ssml[start..].find('"')?;
+    Some(&ssml[start..start + len])
+}
+
 fn lexicon_endpoint(hm_url: &str) -> Result<&str, Error> {
     hm_url
         .strip_prefix("hm:/")
@@ -1054,6 +1084,25 @@ fn lexicon_endpoint(hm_url: &str) -> Result<&str, Error> {
             endpoint.starts_with("/lexicon-session-provider/") && !endpoint.contains("..")
         })
         .ok_or_else(|| Error::invalid_argument(format!("not a DJ session url: {hm_url}")))
+}
+
+#[cfg(test)]
+mod narration_tests {
+    use super::{TtsVoice, narration_voice, ssml_language};
+
+    #[test]
+    fn reads_the_language_of_a_script() {
+        let ssml = r#"<speak xml:lang="de-DE">Das eben war was von SIVERNOT.</speak>"#;
+        assert_eq!(ssml_language(ssml), Some("de-DE"));
+        assert_eq!(ssml_language("<speak>Hi</speak>"), None);
+    }
+
+    #[test]
+    fn passes_voices_by_number() {
+        assert_eq!(narration_voice("VOICE81").value(), 81);
+        assert_eq!(narration_voice("VOICE200").value(), 200);
+        assert_eq!(narration_voice("xavier").enum_value(), Ok(TtsVoice::VOICE1));
+    }
 }
 
 #[cfg(test)]
