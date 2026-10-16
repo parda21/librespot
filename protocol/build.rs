@@ -57,6 +57,7 @@ fn compile() {
         proto_dir.join("instrumentation_params.proto"),
         proto_dir.join("tts-resolve.proto"),
         proto_dir.join("client-tts.proto"),
+        proto_dir.join("dj_interaction_manager.proto"),
         // TODO: remove these legacy protobufs when we are on the new API completely
         proto_dir.join("authentication.proto"),
         proto_dir.join("canvaz.proto"),

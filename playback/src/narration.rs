@@ -3,7 +3,11 @@
 //! friends); Spotify synthesizes it on request, and the line plays before or
 //! after its track, never over it.
 
-use std::{collections::HashMap, io::Cursor, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    io::Cursor,
+    time::Duration,
+};
 
 use librespot_core::Session;
 use symphonia::core::probe::Hint;
@@ -41,8 +45,8 @@ pub(crate) async fn narrate(
     track: Box<dyn AudioDecoder + Send>,
 ) -> Box<dyn AudioDecoder + Send> {
     // Resuming mid-track skips the introduction; it belongs to the start.
-    // Otherwise the in-sequence intro, or the `jump` line when that is all there is.
-    // Telling a skip to this track apart would need spirc to say how it got here.
+    // Otherwise the in-sequence intro, or the `jump` line when that is all there is:
+    // spirc hands over just the jump line when the listener jumped to a new set.
     let intro_kind = match position_ms {
         0 if has_script(narration, "intro") => Some("intro"),
         0 => Some("jump"),
@@ -54,17 +58,25 @@ pub(crate) async fn narrate(
             None => None,
         }
     };
-    // Both at once, so a slow service delays the track by one timeout at most.
-    let (intro, outro) = tokio::join!(
+    // Answering a request, DJ first acknowledges it.
+    let welcome = async {
+        match position_ms {
+            0 => line(session, config, narration, "welcome", track_factor).await,
+            _ => None,
+        }
+    };
+    // All at once, so a slow service delays the track by one timeout at most.
+    let (welcome, intro, outro) = tokio::join!(
+        welcome,
         intro,
         line(session, config, narration, "outro", track_factor)
     );
 
-    if intro.is_none() && outro.is_none() {
+    if welcome.is_none() && intro.is_none() && outro.is_none() {
         return track;
     }
     Box::new(Narrated {
-        intro,
+        intro: welcome.into_iter().chain(intro).collect(),
         track,
         track_done: false,
         outro,
@@ -168,11 +180,11 @@ impl Line {
     }
 }
 
-/// Plays the introduction, then the track, then the closing remark. Position
-/// stays the track's throughout: 0 while it is introduced, its end while the
-/// DJ signs off.
+/// Plays the lines that introduce the track, then the track, then the closing
+/// remark. Position stays the track's throughout: 0 while it is introduced, its
+/// end while the DJ signs off.
 struct Narrated {
-    intro: Option<Line>,
+    intro: VecDeque<Line>,
     track: Box<dyn AudioDecoder + Send>,
     track_done: bool,
     outro: Option<Line>,
@@ -183,7 +195,7 @@ impl AudioDecoder for Narrated {
     /// Seeking means the listener wants the music, so an introduction still
     /// playing is abandoned. The closing remark stays: it follows the end.
     fn seek(&mut self, position_ms: u32) -> Result<u32, crate::decoder::DecoderError> {
-        self.intro = None;
+        self.intro.clear();
         self.track_done = false;
         self.track.seek(position_ms)
     }
@@ -194,10 +206,12 @@ impl AudioDecoder for Narrated {
             skipped: false,
         };
 
-        if let Some(intro) = &mut self.intro {
+        while let Some(intro) = self.intro.front_mut() {
             match intro.next() {
                 Some(packet) => return Ok(Some((at(self.end_ms), packet))),
-                None => self.intro = None,
+                None => {
+                    self.intro.pop_front();
+                }
             }
         }
         if !self.track_done {
@@ -258,7 +272,7 @@ mod tests {
     #[test]
     fn plays_the_track_through_without_lines() {
         let mut narrated = Narrated {
-            intro: None,
+            intro: VecDeque::new(),
             track: Box::new(Fake { next: 0, n: 3 }),
             track_done: false,
             outro: None,
@@ -268,16 +282,20 @@ mod tests {
     }
 
     fn line(n: u32) -> Option<Line> {
+        spoken(n, 0.5)
+    }
+
+    fn spoken(n: u32, gain: f64) -> Option<Line> {
         Some(Line {
             decoder: Box::new(Fake { next: 0, n }),
-            gain: 0.5,
+            gain,
         })
     }
 
     #[test]
     fn the_dj_speaks_before_and_after_at_the_tracks_edges() {
         let mut narrated = Narrated {
-            intro: line(2),
+            intro: line(2).into_iter().collect(),
             track: Box::new(Fake { next: 0, n: 3 }),
             track_done: false,
             outro: line(2),
@@ -301,9 +319,24 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_acknowledges_the_request_before_the_introduction() {
+        let mut narrated = Narrated {
+            intro: spoken(1, 0.25).into_iter().chain(line(1)).collect(),
+            track: Box::new(Fake { next: 0, n: 1 }),
+            track_done: false,
+            outro: None,
+            end_ms: 0,
+        };
+        let gains: Vec<_> = std::iter::from_fn(|| narrated.next_packet().unwrap())
+            .map(|(_, packet)| packet.samples().unwrap()[0])
+            .collect();
+        assert_eq!(gains, [0.25, 0.5, 1.0]);
+    }
+
+    #[test]
     fn seeking_skips_the_intro_but_keeps_the_outro() {
         let mut narrated = Narrated {
-            intro: line(5),
+            intro: line(5).into_iter().collect(),
             track: Box::new(Fake { next: 0, n: 5 }),
             track_done: false,
             outro: line(1),
@@ -317,7 +350,7 @@ mod tests {
     #[test]
     fn seeking_resumes_the_track() {
         let mut narrated = Narrated {
-            intro: None,
+            intro: VecDeque::new(),
             track: Box::new(Fake { next: 0, n: 5 }),
             track_done: false,
             outro: None,

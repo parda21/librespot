@@ -66,6 +66,16 @@ pub(super) trait Metadata {
         (!narration.is_empty()).then_some(narration)
     }
 
+    /// Whether a DJ segment starts here, where DJ's jump button skips to.
+    fn is_jump_target(&self) -> bool {
+        self.get_bool("dj.jump_target") || self.metadata().contains_key("narration.jump.ssml")
+    }
+
+    /// The request to DJ this item answers.
+    fn requested_by(&self) -> Option<&str> {
+        self.get("idj_request_id").map(String::as_str)
+    }
+
     metadata_entry!(is_from_queue use get_bool, set_from_queue, remove_from_queue (is_queued: IS_QUEUED) -> bool);
     metadata_entry!(is_from_autoplay use get_bool, set_from_autoplay, remove_from_autoplay (is_autoplay: IS_AUTOPLAY) -> bool);
     metadata_entry!(is_hidden use get_bool, set_hidden, remove_hidden (is_hidden: HIDDEN) -> bool);

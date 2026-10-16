@@ -380,6 +380,54 @@ impl<'ct> ConnectState {
         self.current_track(|t| t.as_ref().and_then(Metadata::narration))
     }
 
+    /// The lines DJ speaks around the current track when the listener jumped to it: its
+    /// jump line, where it has one, in place of the introduction that follows on from the
+    /// last segment.
+    pub fn current_jump_narration(&self) -> Option<HashMap<String, String>> {
+        let mut narration = self.current_narration()?;
+        let jump = narration
+            .get("narration.jump.ssml")
+            .is_some_and(|ssml| !ssml.is_empty());
+        if jump {
+            narration.retain(|key, _| !key.starts_with("narration.intro"));
+        }
+        Some(narration)
+    }
+
+    /// Skips to the first upcoming track where a DJ segment starts, as DJ's jump button
+    /// does. Stays put and returns false when none is lined up.
+    pub fn skip_to_jump_target(&mut self) -> Result<bool, Error> {
+        self.skip_to_first(|track| track.is_jump_target())
+    }
+
+    /// Skips to the segment DJ put together for the latest request, which it lines up
+    /// behind the one playing. Stays put and returns false when none is lined up.
+    pub fn skip_to_requested(&mut self) -> Result<bool, Error> {
+        let playing = self.current_track(|track| track.requested_by().map(str::to_owned));
+        self.skip_to_first(|track| {
+            track
+                .requested_by()
+                .is_some_and(|request| Some(request) != playing.as_deref())
+        })
+    }
+
+    fn skip_to_first(&mut self, wanted: impl Fn(&ProvidedTrack) -> bool) -> Result<bool, Error> {
+        let target = self
+            .next_tracks()
+            .iter()
+            .find(|track| wanted(track) && !track.is_unavailable())
+            .map(|track| track.uid.clone());
+        let Some(uid) = target else {
+            return Ok(false);
+        };
+        while self.current_track(|track| track.uid != uid) {
+            if self.next_track()?.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub fn has_next_tracks(&self, min: Option<usize>) -> bool {
         if let Some(min) = min {
             self.next_tracks().len() >= min

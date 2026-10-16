@@ -530,6 +530,11 @@ mod dj_tests {
                                 "<speak>Up next</speak>".into(),
                             ),
                             ("narration.intro.voice".into(), "VOICE1".into()),
+                            (
+                                "narration.jump.ssml".into(),
+                                "<speak>Something else</speak>".into(),
+                            ),
+                            ("dj.jump_target".into(), "true".into()),
                         ])
                     } else {
                         HashMap::new()
@@ -587,5 +592,79 @@ mod dj_tests {
         assert!(narration.keys().all(|key| key.starts_with("narration.")));
         // The next track has nothing to say.
         assert_eq!(state.preview_next_track().unwrap().1, None);
+    }
+
+    #[tokio::test]
+    async fn a_jump_skips_to_where_the_next_segment_starts() {
+        let mut state = state();
+        let first = Context {
+            uri: Some(DJ.into()),
+            pages: vec![segment(0, 3, "hm://lexicon/session/1")],
+            ..Default::default()
+        };
+        state.update_context(first, ContextType::Default).unwrap();
+        state.set_current_track(0).unwrap();
+        state.reset_playback_to_position(Some(0)).unwrap();
+
+        // The next segment isn't lined up yet.
+        assert!(!state.skip_to_jump_target().unwrap());
+        assert_eq!(state.current_track(|t| t.uid.clone()), "dj-0");
+
+        state
+            .fill_context_from_page(segment(3, 3, "hm://lexicon/session/2"))
+            .unwrap();
+        state.fill_up_next_tracks().unwrap();
+        assert!(state.skip_to_jump_target().unwrap());
+        assert_eq!(state.current_track(|t| t.uid.clone()), "dj-3");
+    }
+
+    #[tokio::test]
+    async fn an_answered_request_plays_the_segment_put_together_for_it() {
+        let mut state = state();
+        let mut page = segment(0, 3, "hm://lexicon/session/1");
+        // Behind the playing segment: an earlier request's segment, then the latest one.
+        let requested = segment(3, 4, "");
+        for (i, mut track) in requested.tracks.into_iter().enumerate() {
+            let request = if i < 2 { "idj-earlier" } else { "idj-latest" };
+            track
+                .metadata
+                .insert("idj_request_id".into(), request.into());
+            page.tracks.push(track);
+        }
+        let first = Context {
+            uri: Some(DJ.into()),
+            pages: vec![page],
+            ..Default::default()
+        };
+        state.update_context(first, ContextType::Default).unwrap();
+        state.set_current_track(3).unwrap();
+        state.reset_playback_to_position(Some(3)).unwrap();
+
+        // Playing the earlier request's segment, the latest one is next.
+        assert!(state.skip_to_requested().unwrap());
+        assert_eq!(state.current_track(|t| t.uid.clone()), "dj-5");
+        // Nothing else was asked for.
+        assert!(!state.skip_to_requested().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_jump_speaks_the_jump_line_instead_of_the_introduction() {
+        let mut state = state();
+        let first = Context {
+            uri: Some(DJ.into()),
+            pages: vec![segment(0, 3, "hm://lexicon/session/1")],
+            ..Default::default()
+        };
+        state.update_context(first, ContextType::Default).unwrap();
+        state.set_current_track(0).unwrap();
+        state.reset_playback_to_position(Some(0)).unwrap();
+
+        let narration = state.current_jump_narration().unwrap();
+        assert!(narration.contains_key("narration.jump.ssml"));
+        assert!(
+            !narration
+                .keys()
+                .any(|key| key.starts_with("narration.intro"))
+        );
     }
 }

@@ -1,0 +1,46 @@
+// Extracted from: Spotify 9.1.92.3058 (android)
+
+syntax = "proto3";
+
+package spotify.dj.interactionmanager.v0;
+
+option optimize_for = CODE_SIZE;
+
+message ResolveInteractiveContextRequest {
+    string prompt = 1;
+    string session_id = 2;
+    string device_id = 3;
+    string current_segment_id = 4;
+    string retries_left = 5;
+    RequestSubmissionReason reason = 6;
+    string current_track_uri = 7;
+    PromptInputType input_type = 8;
+}
+
+message ResolveInteractiveContextResponse {
+    string status_code = 1;
+    string status_message = 2;
+}
+
+message GetSuggestedPromptsRequest {
+    bool unused = 1;
+    int32 llm_model = 2;
+    string current_track_uri = 3;
+}
+
+message GetSuggestedPromptsResponse {
+    repeated string suggested_prompts = 1;
+}
+
+enum RequestSubmissionReason {
+    REQUEST_PROMPT = 0;
+    DISMISS = 1;
+    NO_MIC_PERMISSIONS = 2;
+}
+
+enum PromptInputType {
+    PROMPT_INPUT_TYPE_UNSPECIFIED = 0;
+    VOICE = 1;
+    TEXT = 2;
+    SUGGESTED = 3;
+}

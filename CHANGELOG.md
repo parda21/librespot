@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [core] Add `SpClient::get_narration_url`, which turns a DJ narration script into the url of its synthesized audio
 - [connect] Play Spotify's DJ: resolve the lexicon session its playlist names, continue through each page's `next_page_url` before autoplay takes over, and start a new set when DJ is started afresh. Advertise `supports_dj` in the device capabilities
 - [playback] Speak the DJ's narration before and after its tracks at Spotify's loudness target. Add `Player::set_narration`, which `Spirc` sends with each track's `narration.*` metadata
+- [connect] Add method `next_segment` to `Spirc`, which jumps DJ to where its next segment starts as the DJ button does in Spotify's clients, introduced by the segment's jump line
+- [connect] Add method `ask_dj` to `Spirc`, which asks DJ for something as typed into Spotify's apps. DJ's answer plays the segment it put together, after a line that acknowledges the request
+- [core] Add `SpClient::ask_dj` and `SpClient::get_dj_suggestions` for DJ's interaction manager, and accept a `play` command without options, as DJ sends to answer a request
+- [playback] Speak DJ's acknowledgement of a request (`narration.welcome`) before the introduction of the track that answers it
 - [main] `--crossfade` option added to binary to set how long one track overlaps the next
 
 ### Changed

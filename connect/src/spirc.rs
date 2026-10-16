@@ -19,6 +19,7 @@ use crate::{
     protocol::{
         connect::{Cluster, ClusterUpdate, LogoutCommand, SetVolumeCommand},
         context::Context,
+        dj_interaction_manager::{PromptInputType, ResolveInteractiveContextRequest},
         explicit_content_pubsub::UserAttributesUpdate,
         player::ProvidedTrack,
         playlist4_external::PlaylistModificationInfo,
@@ -36,13 +37,17 @@ use futures_util::StreamExt;
 use librespot_protocol::context_page::ContextPage;
 use protobuf::MessageField;
 use std::{
+    collections::HashMap,
     future::Future,
     sync::Arc,
     sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::sleep,
+};
 
 #[derive(Debug, Error)]
 enum SpircError {
@@ -111,6 +116,11 @@ struct SpircTask {
     /// when no other future resolves, otherwise resets the delay
     update_state: bool,
 
+    /// Set while loading a track DJ opens other than with its usual introduction.
+    opening: Option<Opening>,
+    /// DJ's acknowledgement of a request, kept until the segment that answers it arrives.
+    dj_answer: Option<(HashMap<String, String>, Instant)>,
+
     spirc_id: usize,
 }
 
@@ -129,7 +139,9 @@ enum SpircCommand {
     Shuffle(bool),
     Repeat(bool),
     RepeatTrack(bool),
-    Disconnect { pause: bool },
+    Disconnect {
+        pause: bool,
+    },
     SetPosition(u32),
     SetVolume(u16),
     Activate,
@@ -137,7 +149,28 @@ enum SpircCommand {
     Load(LoadRequest),
     AddToQueue(SpotifyUri),
     ClearQueue,
+    NextSegment,
+    AskDj {
+        prompt: String,
+        suggested: bool,
+        reply: oneshot::Sender<Result<(), Error>>,
+    },
 }
+
+/// How DJ opens a track, where that isn't its usual introduction.
+enum Opening {
+    /// The listener jumped to the track's segment: its jump line replaces the introduction.
+    Jump,
+    /// DJ answers a request: a line that acknowledges it comes before the introduction.
+    Answer(HashMap<String, String>),
+}
+
+/// The segment a DJ track belongs to.
+const SEGMENT: &str = "segment";
+/// Set in the metadata of the play with which DJ answers a request.
+const INTERACTIVITY_RESPONSE: &str = "interactivity_response";
+/// How long DJ's answer to a request may take to arrive after acknowledging it.
+const DJ_ANSWER_WAIT: Duration = Duration::from_secs(30);
 
 const CONTEXT_FETCH_THRESHOLD: usize = 2;
 
@@ -261,6 +294,8 @@ impl Spirc {
             transfer_state: None,
             update_volume: false,
             update_state: false,
+            opening: None,
+            dj_answer: None,
 
             spirc_id,
         };
@@ -423,6 +458,42 @@ impl Spirc {
     /// context are kept; the next tracks are filled up from the context again.
     pub fn clear_queue(&self) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::ClearQueue)?)
+    }
+
+    /// Jumps DJ to where its next segment starts, as the DJ button does in Spotify's
+    /// clients, and DJ introduces it with the line it keeps for a jump. When the set has
+    /// no segment left, DJ moves on to a new set.
+    ///
+    /// Does nothing if we are not the active device or not playing DJ.
+    pub fn next_segment(&self) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::NextSegment)?)
+    }
+
+    /// Asks DJ for something, as typed into Spotify's apps. The returned future resolves
+    /// once DJ took the request; seconds later it acknowledges it and plays the segment it
+    /// put together. `suggested` tells that the prompt is one of
+    /// [SpClient::get_dj_suggestions].
+    ///
+    /// The request fails if we are not the active device or not playing DJ, or if DJ turns
+    /// it down.
+    ///
+    /// [SpClient::get_dj_suggestions]: librespot_core::spclient::SpClient::get_dj_suggestions
+    pub fn ask_dj(
+        &self,
+        prompt: String,
+        suggested: bool,
+    ) -> Result<impl Future<Output = Result<(), Error>> + use<>, Error> {
+        let (reply, answer) = oneshot::channel();
+        self.commands.send(SpircCommand::AskDj {
+            prompt,
+            suggested,
+            reply,
+        })?;
+        Ok(async move {
+            answer
+                .await
+                .map_err(|_| Error::aborted("the request to DJ didn't go out"))?
+        })
     }
 
     /// Disconnects the current device and pauses the playback according the value.
@@ -590,7 +661,11 @@ impl SpircTask {
                             .collect::<Vec<_>>()
                     }).await
                 }, if allow_context_resolving && self.context_resolver.has_next() => {
-                    let update_state = self.handle_next_context(next_context);
+                    let mut update_state = self.handle_next_context(next_context);
+                    match self.play_dj_answer() {
+                        Ok(answered) => update_state |= answered,
+                        Err(why) => error!("playing DJ's answer failed: {why}"),
+                    }
                     if update_state {
                         if let Err(why) = self.notify().await {
                             error!("update after context resolving failed: {why}")
@@ -736,6 +811,11 @@ impl SpircTask {
             SpircCommand::Transfer(..) | SpircCommand::Activate => {
                 warn!("SpircCommand::{cmd:?} will be ignored while already active")
             }
+            SpircCommand::AskDj { reply, .. } if !self.connect_state.is_active() => {
+                let _ = reply.send(Err(Error::failed_precondition(
+                    "DJ only takes requests on the device playing it",
+                )));
+            }
             _ if !self.connect_state.is_active() => {
                 warn!("SpircCommand::{cmd:?} will be ignored while Not Active")
             }
@@ -763,6 +843,12 @@ impl SpircTask {
                 self.connect_state.clear_queue()?;
                 self.emit_set_queue_event();
             }
+            SpircCommand::NextSegment => self.handle_next_segment().await?,
+            SpircCommand::AskDj {
+                prompt,
+                suggested,
+                reply,
+            } => self.handle_ask_dj(prompt, suggested, reply),
         };
 
         self.notify().await
@@ -1085,6 +1171,13 @@ impl SpircTask {
             Transfer(transfer) => {
                 self.handle_transfer(transfer.data.expect("by condition checked"))?;
                 return self.notify().await;
+            }
+            Play(play)
+                if play.context.metadata.contains_key(INTERACTIVITY_RESPONSE)
+                    && play.context.uri.as_deref() == Some(self.connect_state.context_uri())
+                    && self.playing_dj() =>
+            {
+                self.handle_dj_answer(play.context.metadata)?
             }
             Play(mut play) => {
                 if !self.connect_state.is_active() {
@@ -1470,6 +1563,124 @@ impl SpircTask {
         }
 
         Ok(())
+    }
+
+    async fn handle_next_segment(&mut self) -> Result<(), Error> {
+        if !self.playing_dj() {
+            warn!("only DJ has segments to jump to, ignoring the request");
+            return Ok(());
+        }
+
+        let mut lined_up = self.connect_state.skip_to_jump_target()?;
+        if !lined_up {
+            // The next segment starts on a page that isn't here yet.
+            if let Some(next_page) = self.connect_state.take_next_page_url() {
+                self.context_resolver
+                    .add(ResolveContext::append_context(next_page));
+            }
+            if self.context_resolver.has_next() {
+                let context = self.context_resolver.get_next_context(Vec::new).await;
+                self.handle_next_context(context);
+                self.connect_state.fill_up_next_tracks()?;
+                lined_up = self.connect_state.skip_to_jump_target()?;
+            }
+        }
+
+        self.opening = Some(Opening::Jump);
+        let jumped = if lined_up {
+            self.add_autoplay_resolving_when_required();
+            self.load_track(true, 0)
+        } else {
+            // Starting the session afresh moves it on to a new set.
+            let uri = self.connect_state.context_uri().clone();
+            let options = LoadRequestOptions {
+                start_playing: true,
+                ..Default::default()
+            };
+            self.handle_load(LoadRequest::from_context_uri(uri, options), None, None)
+                .await
+        };
+        self.opening = None;
+        jumped
+    }
+
+    fn handle_ask_dj(
+        &mut self,
+        prompt: String,
+        suggested: bool,
+        reply: oneshot::Sender<Result<(), Error>>,
+    ) {
+        if !self.playing_dj() {
+            let _ = reply.send(Err(Error::failed_precondition(
+                "DJ takes requests only while it plays",
+            )));
+            return;
+        }
+        let input_type = if suggested {
+            PromptInputType::SUGGESTED
+        } else {
+            PromptInputType::TEXT
+        };
+        let request = ResolveInteractiveContextRequest {
+            prompt,
+            session_id: self.session.session_id(),
+            device_id: self.session.device_id().to_string(),
+            current_segment_id: self
+                .connect_state
+                .current_track(|t| t.metadata.get(SEGMENT).cloned())
+                .unwrap_or_default(),
+            current_track_uri: self.connect_state.current_track(|t| t.uri.clone()),
+            input_type: input_type.into(),
+            ..Default::default()
+        };
+        // DJ takes seconds to answer, and its answer arrives here meanwhile.
+        let session = self.session.clone();
+        tokio::spawn(async move {
+            let _ = reply.send(session.spclient().ask_dj(&request).await);
+        });
+    }
+
+    /// DJ answers a request with a play of itself whose metadata acknowledges it. The
+    /// segment it put together arrives moments later, with an update of the context.
+    fn handle_dj_answer(&mut self, metadata: HashMap<String, String>) -> Result<(), Error> {
+        let welcome = metadata
+            .into_iter()
+            .filter(|(key, _)| key.starts_with("narration.welcome."))
+            .collect();
+        self.dj_answer = Some((welcome, Instant::now()));
+        self.play_dj_answer().map(|_| ())
+    }
+
+    /// Plays the segment DJ put together for a request, once it is in the session, after
+    /// the line that acknowledges the request. Returns whether it did.
+    fn play_dj_answer(&mut self) -> Result<bool, Error> {
+        let Some((_, since)) = &self.dj_answer else {
+            return Ok(false);
+        };
+        if since.elapsed() > DJ_ANSWER_WAIT {
+            warn!("DJ's answer to a request never arrived");
+            self.dj_answer = None;
+            return Ok(false);
+        }
+        self.connect_state.fill_up_next_tracks()?;
+        if !self.connect_state.skip_to_requested()? {
+            return Ok(false);
+        }
+        let Some((welcome, _)) = self.dj_answer.take() else {
+            return Ok(false);
+        };
+        self.opening = Some(Opening::Answer(welcome));
+        self.add_autoplay_resolving_when_required();
+        let answered = self.load_track(true, 0);
+        self.opening = None;
+        answered.map(|_| true)
+    }
+
+    /// Whether DJ plays, which streams its tracks from a session.
+    fn playing_dj(&self) -> bool {
+        self.connect_state
+            .get_context(ContextType::Default)
+            .is_ok_and(|ctx| ctx.metadata.contains_key(LEXICON_CONTEXT_URL))
     }
 
     async fn load_context_from_uri(
@@ -1927,8 +2138,16 @@ impl SpircTask {
 
         let current_uri = self.connect_state.current_track(|t| &t.uri);
         let id = SpotifyUri::from_uri(current_uri)?;
-        self.player
-            .set_narration(id.clone(), self.connect_state.current_narration());
+        let narration = match &self.opening {
+            None => self.connect_state.current_narration(),
+            Some(Opening::Jump) => self.connect_state.current_jump_narration(),
+            Some(Opening::Answer(welcome)) => {
+                let mut narration = self.connect_state.current_narration().unwrap_or_default();
+                narration.extend(welcome.clone());
+                Some(narration)
+            }
+        };
+        self.player.set_narration(id.clone(), narration);
         self.player.load(id, start_playing, position_ms);
 
         self.connect_state

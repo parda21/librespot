@@ -95,6 +95,8 @@ pub struct PlayCommand {
     pub context: Context,
     #[serde(deserialize_with = "json_proto")]
     pub play_origin: PlayOrigin,
+    /// Missing when DJ answers a request.
+    #[serde(default)]
     pub options: PlayOptions,
     pub logging_params: LoggingParams,
 }
@@ -177,7 +179,7 @@ pub struct TransferOptions {
     pub retain_session: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct PlayOptions {
     pub skip_to: Option<SkipTo>,
     #[serde(default, deserialize_with = "option_json_proto")]
@@ -214,4 +216,42 @@ pub struct LoggingParams {
     pub command_initiated_time: Option<i64>,
     pub page_instance_ids: Option<Vec<String>>,
     pub command_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dj_answers_a_request_with_a_play_without_options() {
+        // As DJ sent it, cut down to what matters.
+        let json = r#"{
+            "context": {
+                "metadata": {
+                    "interactivity_response": "acknowledge",
+                    "narration.welcome.ssml": "<speak xml:lang=\"de-DE\">Etwas, das entspannt.</speak>",
+                    "narration.welcome.voice": "VOICE85",
+                    "queue.clear": "true"
+                },
+                "pages": [{ "tracks": [] }],
+                "uri": "spotify:playlist:37i9dQZF1EYkqdzj48dyYq"
+            },
+            "endpoint": "play",
+            "logging_params": { "device_identifier": "local" },
+            "play_origin": {
+                "device_identifier": "local",
+                "feature_identifier": "com.spotify.service.endlessfeedservice",
+                "feature_version": "1.0",
+                "view_uri": "spotify:playlist:37i9dQZF1EYkqdzj48dyYq"
+            }
+        }"#;
+        let Command::Play(play) = serde_json::from_str(json).unwrap() else {
+            panic!("not a play");
+        };
+        assert_eq!(
+            play.context.metadata["interactivity_response"],
+            "acknowledge"
+        );
+        assert!(play.options.skip_to.is_none());
+    }
 }

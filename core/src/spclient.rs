@@ -20,6 +20,10 @@ use crate::{
         connect::PutStateRequest,
         context::Context,
         context_page::ContextPage,
+        dj_interaction_manager::{
+            GetSuggestedPromptsRequest, GetSuggestedPromptsResponse,
+            ResolveInteractiveContextRequest, ResolveInteractiveContextResponse,
+        },
         extended_metadata::BatchedEntityRequest,
         extended_metadata::{BatchedExtensionResponse, EntityRequest, ExtensionQuery},
         extension_kind::ExtensionKind,
@@ -54,6 +58,9 @@ component! {
 }
 
 pub type SpClientResult = Result<Bytes, Error>;
+
+/// Where DJ takes requests, as typed or spoken into Spotify's apps.
+const DJ_INTERACTION_MANAGER: &str = "https://exp.wg.spotify.com/dj-interaction-manager/spotify.dj.interactionmanager.v0.DJInteractionManagerService";
 
 #[allow(clippy::declare_interior_mutable_const)]
 pub const CLIENT_TOKEN: HeaderName = HeaderName::from_static("client-token");
@@ -881,6 +888,60 @@ impl SpClient {
             .await
             .map_err(|e| Error::failed_precondition(format!("narration audio: {e}")))?;
         Ok(audio.to_bytes())
+    }
+
+    /// Asks DJ for something, as typed into Spotify's apps. DJ answers on the device the
+    /// request names: it plays DJ again, with a line that acknowledges the request, and the
+    /// segment it put together waits in the session.
+    pub async fn ask_dj(&self, request: &ResolveInteractiveContextRequest) -> Result<(), Error> {
+        let response: ResolveInteractiveContextResponse = self
+            .dj_interaction("ResolveInteractiveContext", request)
+            .await?;
+        match response.status_code.as_str() {
+            "OK" => Ok(()),
+            code => Err(Error::failed_precondition(format!(
+                "DJ turned the request down: {code} {}",
+                response.status_message
+            ))),
+        }
+    }
+
+    /// What Spotify's apps suggest asking DJ for while `track_uri` plays.
+    pub async fn get_dj_suggestions(&self, track_uri: &str) -> Result<Vec<String>, Error> {
+        let request = GetSuggestedPromptsRequest {
+            current_track_uri: track_uri.to_string(),
+            ..Default::default()
+        };
+        let response: GetSuggestedPromptsResponse =
+            self.dj_interaction("GetSuggestedPrompts", &request).await?;
+        Ok(response.suggested_prompts)
+    }
+
+    async fn dj_interaction<R: MessageFull>(
+        &self,
+        method: &str,
+        request: &impl Message,
+    ) -> Result<R, Error> {
+        let token = self.session().login5().auth_token().await?;
+        let mut request = Request::builder()
+            .method(&Method::POST)
+            .uri(format!("{DJ_INTERACTION_MANAGER}/{method}"))
+            .header(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/x-protobuf"),
+            )
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("{} {}", token.token_type, token.access_token))?,
+            )
+            .body(Bytes::from(request.write_to_bytes()?))?;
+        if let Ok(client_token) = self.client_token().await {
+            request
+                .headers_mut()
+                .insert(CLIENT_TOKEN, HeaderValue::from_str(&client_token)?);
+        }
+        let body = self.session().http_client().request_body(request).await?;
+        Ok(R::parse_from_bytes(&body)?)
     }
 
     // Audio preview in 96 kbps MP3, unencrypted
