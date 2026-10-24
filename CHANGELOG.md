@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- [core] Ask for audio keys one at a time and at least 200 ms apart, and after Spotify refuses one wait 3, then 5, then 10 seconds before asking for another, so a burst of requests no longer prolongs a run of refusals; `AudioKeyManager::request` asks again for a refused key up to three times
+
 ### Added
 
+- [core] Add `AudioKeyManager::try_request`, which asks for a key once and not at all while the session waits after a refusal, and `AudioKeyManager::is_backing_off`; `AudioKeyError` gains a `BackingOff` variant (breaking)
 - [connect] Add method `add_to_queue` to `Spirc` to add tracks, episodes, albums and playlists to the queue
 - [connect] Add method `clear_queue` to `Spirc` to remove all manually queued tracks
 - [playback] Add `SetQueue` player event, emitting when the queue changes (context loaded, track added to queue, or queue set via Spotify Connect). Gated behind `ConnectConfig::emit_set_queue_events`
