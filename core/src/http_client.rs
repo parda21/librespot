@@ -1,10 +1,13 @@
 use std::{
+    future::Future,
+    pin::Pin,
     sync::OnceLock,
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
-use futures_util::{FutureExt, future::IntoStream};
+use futures_util::{FutureExt, TryFutureExt, future::IntoStream};
 use governor::{
     Quota, RateLimiter, clock::MonotonicClock, middleware::NoOpMiddleware,
     state::keyed::DefaultKeyedStateStore,
@@ -12,13 +15,17 @@ use governor::{
 use http::{Uri, header::HeaderValue};
 use http_body_util::{BodyExt, Full};
 use hyper::{HeaderMap, Request, Response, StatusCode, body::Incoming, header::USER_AGENT};
-use hyper_proxy2::{Intercept, Proxy, ProxyConnector};
 use hyper_util::{
-    client::legacy::{Client, ResponseFuture, connect::HttpConnector},
-    rt::TokioExecutor,
+    client::legacy::{
+        Client, ResponseFuture,
+        connect::{HttpConnector, proxy::Tunnel},
+    },
+    rt::{TokioExecutor, TokioIo},
 };
 use nonzero_ext::nonzero;
 use thiserror::Error;
+use tokio::net::TcpStream;
+use tower_service::Service;
 use url::Url;
 
 #[cfg(all(feature = "__rustls", not(feature = "native-tls")))]
@@ -92,7 +99,36 @@ impl From<HttpClientError> for Error {
     }
 }
 
-type HyperClient = Client<ProxyConnector<HttpsConnector<HttpConnector>>, Full<bytes::Bytes>>;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Connects directly, or through an HTTP CONNECT tunnel when a proxy is set.
+#[derive(Clone)]
+enum Connector {
+    Direct(HttpConnector),
+    Tunnel(Tunnel<HttpConnector>),
+}
+
+impl Service<Uri> for Connector {
+    type Response = TokioIo<TcpStream>;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, BoxError>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+        match self {
+            Self::Direct(c) => c.poll_ready(cx).map_err(Into::into),
+            Self::Tunnel(c) => c.poll_ready(cx).map_err(Into::into),
+        }
+    }
+
+    fn call(&mut self, dst: Uri) -> Self::Future {
+        match self {
+            Self::Direct(c) => Box::pin(c.call(dst).map_err(Into::into)),
+            Self::Tunnel(c) => Box::pin(c.call(dst).map_err(Into::into)),
+        }
+    }
+}
+
+type HyperClient = Client<HttpsConnector<Connector>, Full<bytes::Bytes>>;
 
 pub struct HttpClient {
     user_agent: HeaderValue,
@@ -147,29 +183,31 @@ impl HttpClient {
     fn try_create_hyper_client(proxy_url: Option<&Url>) -> Result<HyperClient, Error> {
         // configuring TLS is expensive and should be done once per process
 
+        let mut http = HttpConnector::new();
+        http.enforce_http(false);
+        let connector = match proxy_url {
+            Some(proxy_url) => Connector::Tunnel(Tunnel::new(proxy_url.as_str().parse()?, http)),
+            None => Connector::Direct(http),
+        };
+
         #[cfg(all(feature = "__rustls", not(feature = "native-tls")))]
         let https_connector = {
             #[cfg(feature = "rustls-tls-native-roots")]
             let tls = HttpsConnectorBuilder::new().with_native_roots()?;
             #[cfg(feature = "rustls-tls-webpki-roots")]
             let tls = HttpsConnectorBuilder::new().with_webpki_roots();
-            tls.https_or_http().enable_http1().enable_http2().build()
+            tls.https_or_http()
+                .enable_http1()
+                .enable_http2()
+                .wrap_connector(connector)
         };
 
         #[cfg(all(feature = "native-tls", not(feature = "__rustls")))]
-        let https_connector = HttpsConnector::new();
-
-        // When not using a proxy a dummy proxy is configured that will not intercept any traffic.
-        // This prevents needing to carry the Client Connector generics through the whole project
-        let proxy = match &proxy_url {
-            Some(proxy_url) => Proxy::new(Intercept::All, proxy_url.to_string().parse()?),
-            None => Proxy::new(Intercept::None, Uri::from_static("0.0.0.0")),
-        };
-        let proxy_connector = ProxyConnector::from_proxy(https_connector, proxy)?;
+        let https_connector = HttpsConnector::new_with_connector(connector);
 
         let client = Client::builder(TokioExecutor::new())
             .http2_adaptive_window(true)
-            .build(proxy_connector);
+            .build(https_connector);
         Ok(client)
     }
 

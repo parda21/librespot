@@ -31,6 +31,8 @@ use oauth2::{
     basic::BasicClient, basic::BasicTokenType,
 };
 
+mod http;
+
 use log::{error, info, trace};
 use thiserror::Error;
 use url::Url;
@@ -342,7 +344,7 @@ impl OAuthClient {
         let (tx, rx) = mpsc::channel();
         let client = self.client.clone();
         std::thread::spawn(move || {
-            let http_client = reqwest::blocking::Client::new();
+            let http_client = http::send;
             let resp = client
                 .exchange_code(code)
                 .set_pkce_verifier(pkce_verifier)
@@ -361,7 +363,7 @@ impl OAuthClient {
     /// Synchronously obtain a new valid OAuth token from `refresh_token`
     pub fn refresh_token(&self, refresh_token: &str) -> Result<OAuthToken, OAuthError> {
         let refresh_token = RefreshToken::new(refresh_token.to_string());
-        let http_client = reqwest::blocking::Client::new();
+        let http_client = http::send;
         let resp = self
             .client
             .exchange_refresh_token(&refresh_token)
@@ -381,7 +383,7 @@ impl OAuthClient {
         }?;
         trace!("Exchange {code:?} for access token");
 
-        let http_client = reqwest::Client::new();
+        let http_client = http::send_async;
         let resp = self
             .client
             .exchange_code(code)
@@ -396,7 +398,7 @@ impl OAuthClient {
     /// Asynchronously obtain a new valid OAuth token from `refresh_token`
     pub async fn refresh_token_async(&self, refresh_token: &str) -> Result<OAuthToken, OAuthError> {
         let refresh_token = RefreshToken::new(refresh_token.to_string());
-        let http_client = reqwest::Client::new();
+        let http_client = http::send_async;
         let resp = self
             .client
             .exchange_refresh_token(&refresh_token)
@@ -525,7 +527,7 @@ pub fn get_access_token(
     // Do this sync in another thread because I am too stupid to make the async version work.
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let http_client = reqwest::blocking::Client::new();
+        let http_client = http::send;
         let resp = client
             .exchange_code(code)
             .set_pkce_verifier(pkce_verifier)
@@ -622,7 +624,7 @@ impl DeviceAuthClient {
 
     /// Synchronously request a device code for the user to approve
     pub fn request_device_code(&self) -> Result<DeviceAuthorization, OAuthError> {
-        let http_client = reqwest::blocking::Client::new();
+        let http_client = http::send;
         let inner = self
             .client
             .exchange_device_code()
@@ -640,7 +642,7 @@ impl DeviceAuthClient {
     /// Spotify's requested poll interval and any `slow_down` it sends back are
     /// both respected.
     pub fn poll_for_token(&self, auth: &DeviceAuthorization) -> Result<OAuthToken, OAuthError> {
-        let http_client = reqwest::blocking::Client::new();
+        let http_client = http::send;
         let resp = self
             .client
             .exchange_device_access_token(&auth.inner)
@@ -664,7 +666,7 @@ impl DeviceAuthClient {
     /// Synchronously obtain a new valid OAuth token from `refresh_token`
     pub fn refresh_token(&self, refresh_token: &str) -> Result<OAuthToken, OAuthError> {
         let refresh_token = RefreshToken::new(refresh_token.to_string());
-        let http_client = reqwest::blocking::Client::new();
+        let http_client = http::send;
         let resp = self
             .client
             .exchange_refresh_token(&refresh_token)
@@ -676,7 +678,7 @@ impl DeviceAuthClient {
 
     /// Asynchronously request a device code for the user to approve
     pub async fn request_device_code_async(&self) -> Result<DeviceAuthorization, OAuthError> {
-        let http_client = reqwest::Client::new();
+        let http_client = http::send_async;
         let inner = self
             .client
             .exchange_device_code()
@@ -696,7 +698,7 @@ impl DeviceAuthClient {
         &self,
         auth: &DeviceAuthorization,
     ) -> Result<OAuthToken, OAuthError> {
-        let http_client = reqwest::Client::new();
+        let http_client = http::send_async;
         let resp = self
             .client
             .exchange_device_access_token(&auth.inner)
@@ -719,7 +721,7 @@ impl DeviceAuthClient {
     /// Asynchronously obtain a new valid OAuth token from `refresh_token`
     pub async fn refresh_token_async(&self, refresh_token: &str) -> Result<OAuthToken, OAuthError> {
         let refresh_token = RefreshToken::new(refresh_token.to_string());
-        let http_client = reqwest::Client::new();
+        let http_client = http::send_async;
         let resp = self
             .client
             .exchange_refresh_token(&refresh_token)

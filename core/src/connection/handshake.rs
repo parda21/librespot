@@ -1,11 +1,11 @@
 use std::{env::consts::ARCH, io};
 
+use aws_lc_rs::signature::{RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY, RsaPublicKeyComponents};
 use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use hmac::{Hmac, Mac};
 use protobuf::Message;
 use rand::RngCore;
-use rsa::{BigUint, Pkcs1v15Sign, RsaPublicKey};
-use sha1::{Digest, Sha1};
+use sha1::Sha1;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::codec::{Decoder, Framed};
@@ -73,19 +73,16 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .to_owned();
 
     // Prevent man-in-the-middle attacks: check server signature
-    let n = BigUint::from_bytes_be(&SERVER_KEY);
-    let e = BigUint::new(vec![65537]);
-    let public_key = RsaPublicKey::new(n, e).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            HandshakeError::VerificationFailed,
-        )
-    })?;
-
-    let hash = Sha1::digest(&remote_key);
-    let padding = Pkcs1v15Sign::new::<Sha1>();
+    let public_key = RsaPublicKeyComponents {
+        n: &SERVER_KEY[..],
+        e: &[0x01, 0x00, 0x01][..],
+    };
     public_key
-        .verify(padding, &hash, &remote_signature)
+        .verify(
+            &RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY,
+            &remote_key,
+            &remote_signature,
+        )
         .map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,

@@ -17,20 +17,17 @@ default = ["native-tls"]
 # Note: Validation is in oauth since it's compiled first in the dependency tree.
 native-tls = [
     "dep:hyper-tls",
-    "hyper-proxy2/tls",
     "librespot-oauth/native-tls",
     "tokio-tungstenite/native-tls",
 ]
 rustls-tls-native-roots = [
     "__rustls",
-    "hyper-proxy2/rustls",
     "hyper-rustls/native-tokio",
     "librespot-oauth/rustls-tls-native-roots",
     "tokio-tungstenite/rustls-tls-native-roots",
 ]
 rustls-tls-webpki-roots = [
     "__rustls",
-    "hyper-proxy2/rustls-webpki",
     "hyper-rustls/webpki-tokio",
     "librespot-oauth/rustls-tls-webpki-roots",
     "tokio-tungstenite/rustls-tls-webpki-roots",
@@ -44,7 +41,8 @@ librespot-oauth = { version = "0.8.0", path = "../oauth", default-features = fal
 librespot-protocol = { version = "0.8.0", path = "../protocol", default-features = false }
 
 aes = "0.8"
-base64 = "0.22"
+aws-lc-rs = "1"
+base64 = "0.23"
 byteorder = "1.5"
 bytes = "1"
 data-encoding = "2.9"
@@ -62,17 +60,19 @@ httparse = "1.10"
 http = "1.3"
 http-body-util = "0.1"
 hyper = { version = "1.6", features = ["http1", "http2"] }
-hyper-proxy2 = { version = "0.1", default-features = false }
 hyper-rustls = { version = "0.27", default-features = false, features = [
+    "aws-lc-rs",
     "http1",
     "http2",
-    "ring",
 ], optional = true }
 hyper-tls = { version = "0.6", optional = true }
-hyper-util = { version = "0.1", default-features = false, features = [
+hyper-util = { version = "0.1.21", default-features = false, features = [
     "client",
+    "client-legacy",
+    "client-proxy",
     "http1",
     "http2",
+    "tokio",
 ] }
 log = "0.4"
 nonzero_ext = "0.3"
@@ -85,9 +85,8 @@ pin-project-lite = "0.2"
 priority-queue = "2.5"
 protobuf = "3.7"
 protobuf-json-mapping = "3.7"
-quick-xml = { version = "0.38", features = ["serialize"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 rand = { version = "0.9", default-features = false, features = ["thread_rng"] }
-rsa = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = { version = "0.10", features = ["oid"] }
@@ -106,6 +105,7 @@ tokio = { version = "1", features = [
 tokio-stream = { version = "0.1", default-features = false }
 tokio-tungstenite = { version = "0.28", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
+tower-service = "0.3"
 url = "2"
 uuid = { version = "1", default-features = false, features = ["v4"] }
 
