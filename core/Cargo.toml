@@ -41,7 +41,7 @@ librespot-oauth = { version = "0.8.0", path = "../oauth", default-features = fal
 librespot-protocol = { version = "0.8.0", path = "../protocol", default-features = false }
 
 aes = "0.8"
-aws-lc-rs = "1"
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 base64 = "0.23"
 byteorder = "1.5"
 bytes = "1"
