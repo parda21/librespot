@@ -248,6 +248,7 @@ enum PlayerCommand {
     EmitVolumeChangedEvent(u16),
     SetAutoNormaliseAsAlbum(bool),
     SetCrossfade(Duration),
+    SetNormalisation(bool),
     EmitSessionDisconnectedEvent {
         connection_id: String,
         user_name: String,
@@ -787,6 +788,11 @@ impl Player {
 
     pub fn set_crossfade(&self, crossfade: Duration) {
         self.command(PlayerCommand::SetCrossfade(crossfade));
+    }
+
+    /// Turns volume normalisation on or off, from the next packet on.
+    pub fn set_normalisation(&self, normalisation: bool) {
+        self.command(PlayerCommand::SetNormalisation(normalisation));
     }
 
     pub fn emit_filter_explicit_content_changed_event(&self, filter: bool) {
@@ -2279,7 +2285,10 @@ impl PlayerInternal {
 
         let position_ms = loaded_track.stream_position_ms;
 
-        let config = resolve_auto_normalisation(&self.config, self.auto_normalise_as_album);
+        // The factor is worked out either way and only applied while normalisation is on, so
+        // that turning it on reaches the track that plays.
+        let mut config = resolve_auto_normalisation(&self.config, self.auto_normalise_as_album);
+        config.normalisation = true;
         let normalisation_factor =
             NormalisationData::get_factor(&config, loaded_track.normalisation_data);
 
@@ -2754,6 +2763,10 @@ impl PlayerInternal {
 
             PlayerCommand::SetCrossfade(crossfade) => self.crossfade = crossfade.min(CROSSFADE_MAX),
 
+            PlayerCommand::SetNormalisation(normalisation) => {
+                self.config.normalisation = normalisation
+            }
+
             PlayerCommand::EmitSetQueueEvent {
                 context_uri,
                 current_track,
@@ -2963,6 +2976,10 @@ impl fmt::Debug for PlayerCommand {
             PlayerCommand::SetCrossfade(crossfade) => {
                 f.debug_tuple("SetCrossfade").field(&crossfade).finish()
             }
+            PlayerCommand::SetNormalisation(normalisation) => f
+                .debug_tuple("SetNormalisation")
+                .field(&normalisation)
+                .finish(),
             PlayerCommand::EmitFilterExplicitContentChangedEvent(filter) => f
                 .debug_tuple("EmitFilterExplicitContentChangedEvent")
                 .field(&filter)
